@@ -67,21 +67,141 @@ class Plugin:
     screen_off: bool = False
     effect_thread: threading.Thread = None
     effect_running: bool = False
+    sleep_listener_task: asyncio.Task = None
+    rgb_restore_task: asyncio.Task = None
+    sleep_monitor_process: asyncio.subprocess.Process = None
+    rgb_restore_lock: asyncio.Lock = None
     
     async def _main(self):
         """Main entry point for the plugin"""
         self.settings_path = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "settings.json")
+        self.rgb_restore_lock = asyncio.Lock()
         await self.load_settings()
+        self.sleep_listener_task = asyncio.create_task(self._listen_for_sleep_events())
         decky.logger.info("Ally Center initialized")
 
     async def _unload(self):
         """Cleanup when plugin is unloaded"""
+        await self._stop_sleep_listener()
         # Stop any running effect
         self._stop_effect()
         # Restore screen if it was off
         if self.screen_off:
             await self.set_screen_state(True)
         decky.logger.info("Ally Center unloaded")
+
+    async def _stop_sleep_listener(self):
+        """Stop pending resume work and the logind signal listener."""
+        tasks = [self.rgb_restore_task, self.sleep_listener_task]
+        for task in tasks:
+            if task and not task.done():
+                task.cancel()
+
+        if self.sleep_monitor_process and self.sleep_monitor_process.returncode is None:
+            self.sleep_monitor_process.terminate()
+
+        for task in tasks:
+            if task:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    decky.logger.warning(f"Error stopping sleep listener: {e}")
+
+        if self.sleep_monitor_process and self.sleep_monitor_process.returncode is None:
+            try:
+                await asyncio.wait_for(self.sleep_monitor_process.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                self.sleep_monitor_process.kill()
+                await self.sleep_monitor_process.wait()
+
+        self.rgb_restore_task = None
+        self.sleep_listener_task = None
+        self.sleep_monitor_process = None
+
+    async def _listen_for_sleep_events(self):
+        """Listen for logind PrepareForSleep signals using the system D-Bus."""
+        match_rule = (
+            "type='signal',sender='org.freedesktop.login1',"
+            "interface='org.freedesktop.login1.Manager',member='PrepareForSleep'"
+        )
+
+        while True:
+            try:
+                self.sleep_monitor_process = await asyncio.create_subprocess_exec(
+                    "dbus-monitor",
+                    "--system",
+                    match_rule,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                decky.logger.info("Listening for system sleep/resume events")
+
+                while True:
+                    line = await self.sleep_monitor_process.stdout.readline()
+                    if not line:
+                        break
+
+                    event = line.decode(errors="replace").strip()
+                    if event == "boolean true":
+                        decky.logger.info("System suspend detected; pausing RGB effect")
+                        if self.rgb_restore_task and not self.rgb_restore_task.done():
+                            self.rgb_restore_task.cancel()
+                        self._stop_effect()
+                    elif event == "boolean false":
+                        decky.logger.info("System resume detected; restoring RGB state")
+                        if self.rgb_restore_task and not self.rgb_restore_task.done():
+                            self.rgb_restore_task.cancel()
+                        self.rgb_restore_task = asyncio.create_task(
+                            self._restore_rgb_after_resume()
+                        )
+
+                stderr = await self.sleep_monitor_process.stderr.read()
+                message = stderr.decode(errors="replace").strip()
+                decky.logger.warning(
+                    f"Sleep event listener exited"
+                    f"{f': {message}' if message else ''}; restarting"
+                )
+            except asyncio.CancelledError:
+                raise
+            except FileNotFoundError:
+                decky.logger.error(
+                    "Cannot monitor sleep events because dbus-monitor is unavailable"
+                )
+                return
+            except Exception as e:
+                decky.logger.error(f"Sleep event listener failed: {e}")
+            finally:
+                self.sleep_monitor_process = None
+
+            await asyncio.sleep(5)
+
+    async def _restore_rgb_after_resume(self):
+        """Wait for the LED device to return, then restore persisted RGB state."""
+        async with self.rgb_restore_lock:
+            for attempt in range(1, 11):
+                if os.path.exists(ALLY_LED_PATH):
+                    await self._restore_rgb_hardware_state()
+                    decky.logger.info(
+                        f"RGB state restored after resume on attempt {attempt}"
+                    )
+                    return
+
+                if attempt < 10:
+                    decky.logger.info(
+                        f"RGB device unavailable after resume (attempt {attempt}/10)"
+                    )
+                    await asyncio.sleep(1)
+
+            decky.logger.error("RGB device did not return within 10 seconds of resume")
+
+    async def _restore_rgb_hardware_state(self):
+        """Apply settings to both the LED device and MCU without persisting changes."""
+        await self._apply_rgb()
+        await self._set_mcu_powersave(
+            not self.settings.get("rgb_enabled", True)
+        )
 
     async def _migration(self):
         """Handle plugin migrations"""
