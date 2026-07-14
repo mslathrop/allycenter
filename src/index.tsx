@@ -1199,6 +1199,8 @@ const DownloadModeSection: VFC = () => {
   );
 };
 
+const BUILD_TIMESTAMP = "__ALLY_CENTER_BUILD_TIMESTAMP__";
+
 const AboutModal: VFC<{ closeModal: () => void }> = ({ closeModal }) => {
   return (
     <ConfirmModal
@@ -1211,6 +1213,9 @@ const AboutModal: VFC<{ closeModal: () => void }> = ({ closeModal }) => {
       <div style={{ textAlign: "center", marginBottom: "12px" }}>
         <div style={{ fontSize: "18px", fontWeight: "bold", color: "#fff" }}>Ally Center</div>
         <div style={{ fontSize: "12px", color: "#8b929a" }}>Version 1.1.0</div>
+        <div style={{ fontSize: "11px", color: "#8b929a" }}>
+          Built {new Date(BUILD_TIMESTAMP).toLocaleString()}
+        </div>
       </div>
       <div style={{ textAlign: "center" }}>
         <div style={{ color: "#8b929a", fontSize: "11px" }}>Created by</div>

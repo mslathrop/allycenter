@@ -441,6 +441,7 @@ class Plugin:
             self.settings["rgb_enabled"] = effect != "off"
             await self.save_settings()
             await self._apply_rgb()
+            await self._set_mcu_powersave(effect == "off")
             return True
         except Exception as e:
             decky.logger.error(f"Failed to set RGB effect: {e}")
@@ -844,8 +845,11 @@ class Plugin:
                 saved_profile = self.settings.get("saved_profile", "performance")
                 await self.set_performance_profile(saved_profile)
                 
-                # Disable MCU powersave when exiting download mode (restore normal LED behavior)
-                await self._set_mcu_powersave(False)
+                # Preserve the configured RGB state when leaving download mode.
+                # MCU powersave suppresses the charging LED while RGB is disabled.
+                await self._set_mcu_powersave(
+                    not self.settings.get("rgb_enabled", True)
+                )
                 
                 self.screen_off = False
             else:
